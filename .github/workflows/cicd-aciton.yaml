@@ -1,0 +1,87 @@
+name: Frontend CI / CD
+
+# master 브랜치에 push 되면 workflow 작동
+on:
+  push:
+    branches:
+      - "main"
+
+# workflow 내에서 사용할 변수 값 저장
+env:
+  AWS_REGION: ap-northeast-2                   
+  ECR_REPOSITORY_NAME: "team-1"
+  ENV_NAME: "prod"
+  APP: "client-app" 
+
+jobs:
+  deploy:
+    name: Deploy
+    runs-on: ubuntu-latest # 어떤 os 에서 실행시킬지
+    environment: production
+
+    steps:
+    # Github에 저장된 코드를 CI 서버로 내려받아 뒷 step에서 사용할 수 있도록 하는 과정
+    - name: Checkout
+      uses: actions/checkout@v3 
+        
+    # Github Secret과 local env 에 저장된 값 불러오기
+    - name: Configure AWS credentials
+      uses: aws-actions/configure-aws-credentials@v1
+      with:
+        aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY }}
+        aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+        aws-region: ${{ secrets.AWS_REGION }}
+
+    # access key와 secret를 사용하여 ECR에 push할 수 있도록 인증
+    - name: Login to Amazon ECR
+      id: login-ecr
+      uses: aws-actions/amazon-ecr-login@v1
+
+    # Dockerfile 을 기준으로 이미지 빌드 후 ecr로 push
+    - name: Set up Docker Buildx
+      id: docker_build
+      uses: docker/setup-buildx-action@v2
+
+    - name: main Environment Docker build & Push Docker image to Amazon ECR
+      uses: docker/build-push-action@v2
+      if: contains(github.ref, 'main')
+      env:
+        ECR: ${{ steps.login-ecr.outputs.registry }}
+        TAG: ${{ github.sha }}
+      with:
+        context: .
+        push: true
+        tags: |
+          ${{env.ECR}}/pda-project:main-${{env.TAG}}
+        cache-from: type=gha
+        cache-to: type=gha,mode=max
+        build-args: |
+          ENV=main
+    
+    - name: Checkout for Kustomize repository
+      uses: actions/checkout@v2
+      with:
+        # kubernetes yaml 파일 저장
+        repository: kimdabeans/cicd-gitops-eks # k8s yaml 파일이 있는 repo
+        ref: main  # branch 이름
+        # 내 repository에 push 하기 위한 Personal Access Token이 필요
+        token: ${{ secrets.ACTION_TOKEN }} # Github Action token을 발급받아서 repo secrect에 등록해줘야한다
+        path: cicd-gitops-eks # 최상위 경로로 repository와 동일하게 설정
+
+    # 새 이미지 버전으로 파일의 태그값 수정
+    # cd path 수정
+    # kustomize 로 image tag 값 변경
+    - name: Update Kubernetes resources
+      run: |
+        pwd
+        cd cicd-gitops-eks/overlays/${{ env.ENV_NAME }}/ 
+        kustomize edit set image ${{ env.APP }}:main-${{ github.sha }}
+
+    # 수정된 kustomization.yaml 파일 commit push
+    - name: Commit minifest files
+      run: |
+        cd cicd-gitops-eks
+        git config --global user.email "kimdabeans@gmail.com"
+        git config --global user.name "kimdabeans"
+        git commit -am "Update image"
+        git push -u origin main
